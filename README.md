@@ -18,13 +18,15 @@ Environment-driven configuration for easy deployment.
 ## Installation
 1. Clone the repository:
     `git clone https://github.com/yourusername/Flask-Media-Uploader.git`
-    `cd Flask-Media-Uploader`
 
-2. Create and activate a Python virtual environment:
+   `cd Flask-Media-Uploader`
+
+3. Create and activate a Python virtual environment:
     `python -m venv venv`
-    `source venv/bin/activate`
 
-3. Install dependencies:
+   `source venv/bin/activate`
+
+5. Install dependencies:
     `pip install -r requirements.txt`
 
 ---
