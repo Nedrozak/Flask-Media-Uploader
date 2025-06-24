@@ -33,9 +33,13 @@ Environment-driven configuration for easy deployment.
 Set the following environment variables, preferably in a .env file
 
 `FLASK_SECRET_KEY=your_secret_key`
+
 `REDIS_URL=redis://REDIS_URL/0`
+
 `UPLOAD_FOLDER=/path/to/uploads`
+
 `MAX_CONTENT_LENGTH=1073741824`  Maximum file size (1 GB in bytes)
+
 `CHUNK_SIZE=5242880`             5 MB in bytes
 
 ---
