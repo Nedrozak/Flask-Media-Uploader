@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install libmagic
+        run: sudo apt-get update && sudo apt-get install -y libmagic1
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+      - name: Install Python dependencies
+        run: python -m pip install -c constraints.lock -e . --group dev
+      - name: Check dependency consistency
+        run: pip check
+      - name: Verify runtime dependency lock
+        if: matrix.python == '3.13'
+        run: python tools/check_runtime_lock.py
+      - name: Ruff format
+        if: matrix.python == '3.13'
+        run: ruff format --check .
+      - name: Ruff lint
+        if: matrix.python == '3.13'
+        run: ruff check .
+      - name: Mypy
+        if: matrix.python == '3.13'
+        run: mypy media_uploader tests tools
+      - name: Dependency audit
+        if: matrix.python == '3.13'
+        run: pip-audit
+      - name: Pytest
+        run: pytest --cov=media_uploader --cov-report=term-missing --cov-fail-under=70
+      - uses: actions/setup-node@v4
+        if: matrix.python == '3.13'
+        with:
+          node-version: "22"
+      - name: JavaScript syntax
+        if: matrix.python == '3.13'
+        run: |
+          node --check media_uploader/static/scripts/index.js
+          node --check media_uploader/static/scripts/summary.js
+
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install libmagic
+        run: sudo apt-get update && sudo apt-get install -y libmagic1
+      - name: Install application and E2E dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -c constraints.lock -e . --group dev --group e2e
+          python -m playwright install --with-deps ${{ matrix.browser }}
+      - name: Type-check E2E suite
+        run: mypy e2e
+      - name: Browser upload/share/download flow
+        env:
+          E2E_REDIS_URL: redis://127.0.0.1:6379/15
+        run: pytest e2e -q --browser ${{ matrix.browser }}
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose files
+        env:
+          FLASK_SECRET_KEY: ci-only-secret-ci-only-secret-ci-only-secret
+          UPLOAD_HOST: uploads.example.test
+          ACME_EMAIL: admin@example.test
+        run: |
+          docker compose config >/dev/null
+          docker compose -f docker-compose.dev.yml config >/dev/null
+      - name: Build image
+        run: docker build -t media-uploader:test .

@@ -1,0 +1,61 @@
+{% extends "base.jinja" %}
+{% block title %}Upload Images &amp; Videos{% endblock %}
+
+{% block content %}
+  <h1 class="h2 mb-4 text-center">Upload Images &amp; Videos</h1>
+  <form
+    id="uploadForm"
+    method="post"
+    enctype="multipart/form-data"
+    data-session-id="{{ session_id }}"
+    data-max-file-size="{{ config.MAX_FILE_SIZE }}"
+    data-max-session-bytes="{{ config.MAX_SESSION_BYTES }}"
+    data-max-files="{{ config.MAX_FILES_PER_SESSION }}"
+    data-chunk-size="{{ config.CHUNK_SIZE }}"
+    data-concurrency="{{ config.UPLOAD_CONCURRENCY }}"
+    data-request-timeout-ms="{{ config.UPLOAD_REQUEST_TIMEOUT_MS }}"
+    data-chunk-retries="{{ config.CHUNK_UPLOAD_RETRIES }}"
+    data-allowed-extensions="{{ allowed_extensions | join(',') }}"
+  >
+    <div class="mb-3">
+      <span class="form-label d-block">Select files</span>
+      <div class="file-picker-control">
+        <button
+          type="button"
+          class="file-picker-button"
+          id="chooseFilesBtn"
+          aria-controls="fileList"
+        >
+          Choose files
+        </button>
+        <span id="fileSelectionSummary" class="file-picker-summary" role="status" aria-live="polite">
+          No files selected
+        </span>
+      </div>
+      <input
+        class="visually-hidden"
+        type="file"
+        id="fileInput"
+        accept="{{ accept_filter }}"
+        multiple
+        tabindex="-1"
+        aria-hidden="true"
+      />
+      <div id="uploadLimits" class="form-text upload-help">
+        Up to {{ config.MAX_FILES_PER_SESSION }} files, {{ max_file_size }} per file and
+        {{ max_session_size }} per session.
+      </div>
+      <ul id="fileList" class="list-group mt-2" aria-live="polite"></ul>
+    </div>
+
+    <div id="uploadStatus" class="status-message mb-3" role="status" aria-live="polite"></div>
+    <div class="d-flex gap-2 upload-actions">
+      <button type="submit" class="btn btn-primary flex-grow-1" id="uploadBtn" disabled>Upload</button>
+      <button type="button" class="btn btn-outline-light" id="cancelBtn" hidden>Cancel</button>
+    </div>
+  </form>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', filename='scripts/index.js') }}" defer></script>
+{% endblock %}

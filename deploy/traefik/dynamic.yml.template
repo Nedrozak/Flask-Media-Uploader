@@ -1,0 +1,61 @@
+http:
+  routers:
+    media-uploader-http:
+      rule: "Host(`@@UPLOAD_HOST@@`)"
+      entryPoints:
+        - web
+      middlewares:
+        - redirect-to-https
+      service: media-uploader
+
+    media-uploader-protected:
+      rule: "Host(`@@UPLOAD_HOST@@`) && (Path(`/`) || PathPrefix(`/api/uploads`) || PathPrefix(`/admin`))"
+      priority: 100
+      entryPoints:
+        - websecure
+      middlewares:
+        - upload-auth
+        - request-size-limit
+      service: media-uploader
+      tls:
+        certResolver: le
+
+    media-uploader-public:
+      rule: "Host(`@@UPLOAD_HOST@@`)"
+      priority: 10
+      entryPoints:
+        - websecure
+      middlewares:
+        - strip-authorization
+        - request-size-limit
+      service: media-uploader
+      tls:
+        certResolver: le
+
+  middlewares:
+    redirect-to-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
+
+    upload-auth:
+      basicAuth:
+        usersFile: /run/secrets/upload-users.htpasswd
+        realm: "Media Uploader"
+        removeHeader: true
+
+    strip-authorization:
+      headers:
+        customRequestHeaders:
+          Authorization: ""
+
+    request-size-limit:
+      buffering:
+        maxRequestBodyBytes: @@MAX_REQUEST_SIZE@@
+
+  services:
+    media-uploader:
+      loadBalancer:
+        servers:
+          - url: "http://web:5000"
+        passHostHeader: true

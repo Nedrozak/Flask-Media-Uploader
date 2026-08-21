@@ -1,0 +1,384 @@
+:root {
+  --bg-body: #1e1e1e;
+  --bg-card: #3e3e3e;
+  --text: #ffffff;
+  --text-muted: #d6d6d6;
+  --radius: 0.5rem;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+  --gap: 0.5rem;
+  --small-gap: 0.25rem;
+}
+
+body {
+  min-height: 100vh;
+  background: var(--bg-body);
+  color: var(--text);
+}
+
+.upload-card {
+  position: relative;
+  width: min(90%, 800px);
+  margin: 1.5rem auto;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  background: var(--bg-card);
+}
+
+.upload-help,
+.expiry-info,
+.file-size,
+.upload-info {
+  color: var(--text-muted);
+}
+
+
+
+.file-picker-control {
+  display: flex;
+  width: 100%;
+  min-height: 3rem;
+  overflow: hidden;
+  border: 1px solid #ced4da;
+  border-radius: var(--radius);
+  background: #fff;
+  color: #212529;
+  transition:
+    border-color 0.15s ease-in-out,
+    box-shadow 0.15s ease-in-out;
+}
+
+.file-picker-control:focus-within {
+  border-color: #86b7fe;
+  box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+}
+
+.file-picker-button {
+  flex: 0 0 auto;
+  border: 0;
+  border-right: 1px solid #ced4da;
+  padding: 0.625rem 1rem;
+  background: #f8f9fa;
+  color: #212529;
+  font: inherit;
+  cursor: pointer;
+}
+
+.file-picker-button:hover:not(:disabled) {
+  background: #e9ecef;
+}
+
+.file-picker-button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #0d6efd;
+  outline-offset: -2px;
+}
+
+.file-picker-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.file-picker-summary {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  overflow: hidden;
+  padding: 0.625rem 0.875rem;
+  color: #212529;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#fileList .list-group-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  color: #212529;
+}
+
+#fileList .filename-text {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#fileList .file-size {
+  flex: 0 0 auto;
+  margin-left: var(--gap);
+  font-size: 0.9rem;
+}
+
+#fileList .remove-btn,
+#fileList .file-actions {
+  flex: 0 0 auto;
+  margin-left: var(--gap);
+}
+
+#fileList .progress-shell {
+  width: 100%;
+}
+
+#fileList .upload-progress {
+  display: block;
+  width: 100%;
+  height: 1rem;
+}
+
+#fileList .upload-progress-error {
+  accent-color: #dc3545;
+}
+
+#fileList .upload-info {
+  display: block;
+  width: 100%;
+  min-height: 1.4rem;
+  margin-top: var(--small-gap);
+  color: #6c757d;
+  font-size: 0.85rem;
+}
+
+#fileList .file-size {
+  color: #6c757d;
+}
+
+#fileList .upload-info-error {
+  color: #b02a37;
+}
+
+#fileList .upload-info-success {
+  color: #146c43;
+}
+
+#fileList .media-container {
+  flex: 0 0 100%;
+  width: 100%;
+}
+
+#fileList .media-container:empty {
+  display: none;
+}
+
+.media-container img,
+.media-container video {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  height: auto;
+  border-radius: var(--small-gap);
+}
+
+.status-message {
+  min-height: 1.5rem;
+  color: var(--text-muted);
+}
+
+.status-error {
+  color: #ffd6d6;
+}
+
+.upload-actions .btn {
+  margin-left: 0;
+}
+
+a[aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0.65;
+}
+
+@media (max-width: 576px) {
+  html {
+    font-size: 0.9rem;
+  }
+
+  .upload-card h1 {
+    margin-top: 3rem;
+  }
+
+  .file-row {
+    flex-wrap: wrap;
+    gap: var(--gap);
+  }
+
+  #fileList .file-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+}
+
+.file-hash {
+  color: #6c757d;
+  font-size: 0.7rem;
+  font-weight: 400;
+  line-height: 1.2;
+  opacity: 0.8;
+  overflow-wrap: anywhere;
+}
+
+/* Administration */
+.admin-card {
+  width: min(96%, 1200px);
+}
+
+.admin-login {
+  max-width: 28rem;
+}
+
+.admin-muted,
+.admin-subtle {
+  color: var(--text-muted);
+}
+
+.admin-subtle {
+  font-size: 0.78rem;
+}
+
+.admin-table-wrap {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius);
+}
+
+.admin-table {
+  --bs-table-bg: #303030;
+  --bs-table-hover-bg: #383838;
+  --bs-table-border-color: rgba(255, 255, 255, 0.12);
+  font-size: 0.82rem;
+}
+
+.admin-table th {
+  color: #dcdcdc;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.admin-status {
+  text-transform: capitalize;
+}
+
+.admin-status-active {
+  background: #198754;
+}
+
+.admin-status-expired {
+  background: #6c757d;
+}
+
+.admin-status-revoked {
+  background: #dc3545;
+}
+
+.admin-id {
+  color: #c8d6e5;
+  font-size: 0.78rem;
+}
+
+.admin-empty,
+.admin-section,
+.admin-danger-zone,
+.admin-detail-card {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.admin-empty,
+.admin-section,
+.admin-danger-zone {
+  padding: 1rem;
+}
+
+.admin-danger-zone {
+  border-color: rgba(220, 53, 69, 0.6);
+}
+
+.admin-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--gap);
+}
+
+.admin-detail-card {
+  padding: 0.85rem;
+}
+
+.admin-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.admin-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--gap);
+}
+
+.admin-stat-grid > div {
+  padding: 0.75rem;
+  border-radius: var(--small-gap);
+  background: rgba(255, 255, 255, 0.06);
+  text-align: center;
+}
+
+.admin-stat-grid strong,
+.admin-stat-grid span {
+  display: block;
+}
+
+.admin-stat-grid strong {
+  font-size: 1.4rem;
+}
+
+.admin-stat-grid span {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.admin-back-link {
+  color: #d6d6d6;
+  text-decoration: none;
+}
+
+.admin-back-link:hover {
+  color: #fff;
+}
+
+.admin-break {
+  overflow-wrap: anywhere;
+}
+
+.admin-file-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  color: #212529;
+}
+
+.admin-file-row .admin-subtle {
+  color: #6c757d;
+}
+
+@media (max-width: 768px) {
+  .admin-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-table {
+    font-size: 0.78rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .admin-detail-grid,
+  .admin-stat-grid {
+    grid-template-columns: 1fr;
+  }
+}

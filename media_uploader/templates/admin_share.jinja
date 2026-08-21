@@ -1,0 +1,111 @@
+{% extends "base.jinja" %}
+{% block main_class %}upload-card admin-card p-3 p-md-5{% endblock %}
+{% block title %}Share details · Media Uploader{% endblock %}
+
+{% block content %}
+  <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-4">
+    <div>
+      <a class="admin-back-link" href="{{ url_for('admin.index') }}">← All shares</a>
+      <h1 class="h2 mt-2 mb-0">Share details</h1>
+    </div>
+    <form method="post" action="{{ url_for('admin.logout') }}">
+      <input type="hidden" name="csrf_token" value="{{ page_csrf_token }}" />
+      <button class="btn btn-sm btn-outline-light" type="submit">Sign out</button>
+    </form>
+  </div>
+
+  <div class="admin-detail-grid mb-4">
+    <div class="admin-detail-card">
+      <span class="admin-label">Status</span>
+      <span class="badge admin-status admin-status-{{ record.status }}">{{ record.status }}</span>
+    </div>
+    <div class="admin-detail-card">
+      <span class="admin-label">Created</span>
+      <strong>{{ record.created_at_display }}</strong>
+    </div>
+    <div class="admin-detail-card">
+      <span class="admin-label">Expires</span>
+      <strong>{{ record.expires_at_display }}</strong>
+    </div>
+    <div class="admin-detail-card">
+      <span class="admin-label">Files</span>
+      <strong>{{ record.file_count }} · {{ record.total_bytes_display }}</strong>
+    </div>
+  </div>
+
+  {% if record.share_url %}
+    <div class="mb-4">
+      <label for="adminShareUrl" class="form-label">Shareable link</label>
+      <div class="input-group">
+        <input id="adminShareUrl" class="form-control" type="text" value="{{ record.share_url }}" readonly />
+        <a class="btn btn-outline-light" href="{{ record.share_url }}" target="_blank" rel="noopener">Open</a>
+      </div>
+    </div>
+  {% endif %}
+
+  <section class="admin-section mb-4">
+    <h2 class="h5">Creator</h2>
+    <dl class="row mb-0">
+      <dt class="col-sm-3">Visitor</dt>
+      <dd class="col-sm-9"><code class="admin-id">{{ record.creator_visitor or "Unknown" }}</code></dd>
+      <dt class="col-sm-3">IP address</dt>
+      <dd class="col-sm-9">{{ record.creator_ip or "Unknown" }}</dd>
+      <dt class="col-sm-3">User-Agent</dt>
+      <dd class="col-sm-9 admin-break">{{ record.creator_user_agent or "Unknown" }}</dd>
+    </dl>
+  </section>
+
+  <section class="admin-section mb-4">
+    <h2 class="h5">Activity</h2>
+    <div class="admin-stat-grid">
+      <div><strong>{{ record.opens }}</strong><span>Opens</span></div>
+      <div><strong>{{ record.previews }}</strong><span>Previews</span></div>
+      <div><strong>{{ record.downloads }}</strong><span>Downloads</span></div>
+    </div>
+    <dl class="row mt-3 mb-0">
+      <dt class="col-sm-3">Last access</dt>
+      <dd class="col-sm-9">{{ record.last_access_at_display }}</dd>
+      <dt class="col-sm-3">Last visitor</dt>
+      <dd class="col-sm-9"><code class="admin-id">{{ record.last_access_visitor or "—" }}</code></dd>
+      <dt class="col-sm-3">Last IP</dt>
+      <dd class="col-sm-9">{{ record.last_access_ip or "—" }}</dd>
+    </dl>
+  </section>
+
+  <section class="admin-section mb-4">
+    <h2 class="h5">Files</h2>
+    {% if record.files %}
+      <ul class="list-group">
+        {% for file in record.files %}
+          <li class="list-group-item admin-file-row">
+            <div>
+              <strong class="admin-break">{{ file.name }}</strong>
+              <span class="d-block admin-subtle">{{ file.size_display }} · {{ file.mime }}</span>
+            </div>
+            {% if file.sha256 %}
+              <code class="file-hash">{{ file.sha256 }}</code>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="admin-muted mb-0">File metadata is unavailable for this record.</p>
+    {% endif %}
+  </section>
+
+  {% if record.revoked_at %}
+    <div class="alert alert-warning">
+      Revoked {{ record.revoked_at_display }}
+      {% if record.revoked_by %}by visitor <code>{{ record.revoked_by }}</code>{% endif %}.
+    </div>
+  {% elif record.status == "active" %}
+    <section class="admin-danger-zone">
+      <h2 class="h5">Revoke share</h2>
+      <p class="mb-3">Immediately invalidates the bearer link and removes its stored files.</p>
+      <form method="post" action="{{ url_for('admin.revoke', token=record.token) }}">
+        <input type="hidden" name="csrf_token" value="{{ page_csrf_token }}" />
+        <button class="btn btn-danger" type="submit">Revoke and delete files</button>
+      </form>
+    </section>
+  {% endif %}
+{% endblock %}

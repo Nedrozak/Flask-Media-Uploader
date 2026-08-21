@@ -1,0 +1,100 @@
+{% extends "base.jinja" %}
+{% block main_class %}upload-card admin-card p-3 p-md-5{% endblock %}
+{% block title %}Share administration · Media Uploader{% endblock %}
+
+{% block content %}
+  <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-4">
+    <div>
+      <h1 class="h2 mb-1">Share administration</h1>
+      <p class="admin-muted mb-0">{{ total }} recorded share{% if total != 1 %}s{% endif %}</p>
+    </div>
+    <div class="d-flex gap-2">
+      <a class="btn btn-sm btn-outline-light" href="{{ url_for('main.index') }}">Site</a>
+      <form method="post" action="{{ url_for('admin.logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ page_csrf_token }}" />
+        <button class="btn btn-sm btn-outline-light" type="submit">Sign out</button>
+      </form>
+    </div>
+  </div>
+
+  {% if error %}
+    <div class="alert alert-danger" role="alert">{{ error }}</div>
+  {% endif %}
+
+  {% if records %}
+    <div class="table-responsive admin-table-wrap">
+      <table class="table table-dark table-hover align-middle mb-0 admin-table">
+        <thead>
+          <tr>
+            <th scope="col">Status</th>
+            <th scope="col">Created</th>
+            <th scope="col">Expires</th>
+            <th scope="col">Created by</th>
+            <th scope="col">Files</th>
+            <th scope="col">Activity</th>
+            <th scope="col" class="text-end">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for record in records %}
+            <tr>
+              <td>
+                <span class="badge admin-status admin-status-{{ record.status }}">{{ record.status }}</span>
+                {% if record.source == "discovered" %}
+                  <span class="d-block admin-subtle mt-1">pre-registry</span>
+                {% endif %}
+              </td>
+              <td class="text-nowrap">{{ record.created_at_display }}</td>
+              <td class="text-nowrap">{{ record.expires_at_display }}</td>
+              <td>
+                {% if record.creator_visitor %}
+                  <code class="admin-id">{{ record.creator_visitor }}</code>
+                {% else %}
+                  <span class="admin-subtle">Unknown</span>
+                {% endif %}
+                {% if record.creator_ip %}
+                  <span class="d-block admin-subtle">{{ record.creator_ip }}</span>
+                {% endif %}
+              </td>
+              <td>
+                {{ record.file_count }}
+                <span class="d-block admin-subtle">{{ record.total_bytes_display }}</span>
+              </td>
+              <td class="text-nowrap">
+                {{ record.opens }} open{% if record.opens != 1 %}s{% endif %}
+                <span class="d-block admin-subtle">
+                  {{ record.previews }} preview{% if record.previews != 1 %}s{% endif %} ·
+                  {{ record.downloads }} download{% if record.downloads != 1 %}s{% endif %}
+                </span>
+              </td>
+              <td class="text-end text-nowrap">
+                <a class="btn btn-sm btn-outline-light" href="{{ url_for('admin.share_detail', token=record.token) }}">Details</a>
+                {% if record.status == "active" and record.share_url %}
+                  <a class="btn btn-sm btn-outline-primary" href="{{ record.share_url }}" target="_blank" rel="noopener">Open</a>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if pages > 1 %}
+      <nav class="mt-3" aria-label="Admin share pages">
+        <ul class="pagination pagination-sm mb-0">
+          <li class="page-item{% if page <= 1 %} disabled{% endif %}">
+            <a class="page-link" href="{{ url_for('admin.index', page=page-1) }}">Previous</a>
+          </li>
+          <li class="page-item disabled"><span class="page-link">Page {{ page }} of {{ pages }}</span></li>
+          <li class="page-item{% if page >= pages %} disabled{% endif %}">
+            <a class="page-link" href="{{ url_for('admin.index', page=page+1) }}">Next</a>
+          </li>
+        </ul>
+      </nav>
+    {% endif %}
+  {% else %}
+    <div class="admin-empty">
+      No share links have been recorded yet.
+    </div>
+  {% endif %}
+{% endblock %}

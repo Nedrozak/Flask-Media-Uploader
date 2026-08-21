@@ -1,0 +1,165 @@
+services:
+  traefik:
+    image: traefik:v3.7
+    restart: unless-stopped
+    user: "65532:65532"
+    command:
+      - --entrypoints.web.address=:8080
+      - --entrypoints.websecure.address=:8443
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --providers.file.watch=true
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?Set ACME_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --accesslog=true
+      - --accesslog.bufferingsize=100
+      - --accesslog.format=json
+      - --accesslog.fields.defaultmode=drop
+      - --accesslog.fields.names.StartUTC=keep
+      - --accesslog.fields.names.Duration=keep
+      - --accesslog.fields.names.RouterName=keep
+      - --accesslog.fields.names.ClientAddr=keep
+      - --accesslog.fields.names.ClientHost=keep
+      - --accesslog.fields.names.ClientPort=keep
+      - --accesslog.fields.names.RequestHost=keep
+      - --accesslog.fields.names.RequestMethod=keep
+      - --accesslog.fields.names.RequestProtocol=keep
+      - --accesslog.fields.names.RequestScheme=keep
+      - --accesslog.fields.names.DownstreamStatus=keep
+      - --accesslog.fields.names.DownstreamContentSize=keep
+      - --accesslog.fields.names.TLSVersion=keep
+      - --accesslog.fields.names.TLSCipher=keep
+      - --accesslog.fields.queryparameters.defaultmode=drop
+      - --log.level=INFO
+    ports:
+      - "80:8080"
+      - "443:8443"
+    volumes:
+      - "${MEDIA_UPLOADER_DATA_DIR:?Set MEDIA_UPLOADER_DATA_DIR}/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro"
+      - "${MEDIA_UPLOADER_DATA_DIR:?Set MEDIA_UPLOADER_DATA_DIR}/secrets/upload-users.htpasswd:/run/secrets/upload-users.htpasswd:ro"
+      - "${MEDIA_UPLOADER_DATA_DIR:?Set MEDIA_UPLOADER_DATA_DIR}/letsencrypt:/letsencrypt"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"
+    networks:
+      - edge
+
+  web:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?Set FLASK_SECRET_KEY}
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_FOLDER: /app/uploads
+      AUDIT_LOG_PATH: /app/audit/audit.jsonl
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-14}
+      SESSION_COOKIE_SECURE: "true"
+      HSTS_MAX_AGE: "31536000"
+      TRUSTED_HOSTS: ${UPLOAD_HOST:?Set UPLOAD_HOST}
+      PROXY_FIX_X_FOR: "1"
+      PROXY_FIX_X_PROTO: "1"
+      PROXY_FIX_X_HOST: "1"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - "${MEDIA_UPLOADER_DATA_DIR:?Set MEDIA_UPLOADER_DATA_DIR}/uploads:/app/uploads"
+      - "${MEDIA_UPLOADER_DATA_DIR:?Set MEDIA_UPLOADER_DATA_DIR}/audit:/app/audit"
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"
+    networks:
+      - edge
+      - backend
+
+  cleanup:
+    build: .
+    restart: unless-stopped
+    command: ["media-uploader-cleanup"]
+    healthcheck:
+      disable: true
+    env_file:
+      - .env
+    environment:
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?Set FLASK_SECRET_KEY}
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_FOLDER: /app/uploads
+      AUDIT_LOG_PATH: ""
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - "${MEDIA_UPLOADER_DATA_DIR:?Set MEDIA_UPLOADER_DATA_DIR}/uploads:/app/uploads"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"
+    networks:
+      - backend
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - "${MEDIA_UPLOADER_DATA_DIR:?Set MEDIA_UPLOADER_DATA_DIR}/redis:/data"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"
+    networks:
+      - backend
+
+networks:
+  edge:
+    name: ${COMPOSE_PROJECT_NAME:-media-uploader}_edge
+    driver: bridge
+  backend:
+    name: ${COMPOSE_PROJECT_NAME:-media-uploader}_backend
+    driver: bridge
+    internal: true
