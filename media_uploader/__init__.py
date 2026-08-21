@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import click
 import redis
@@ -18,7 +19,7 @@ from media_uploader.blueprints.main import bp as main_bp
 from media_uploader.blueprints.shares import bp as shares_bp
 from media_uploader.blueprints.uploads import bp as uploads_bp
 from media_uploader.config import Config
-from media_uploader.extensions import csrf, init_redis
+from media_uploader.extensions import csrf, init_r2, init_redis
 from media_uploader.responses import json_error
 from media_uploader.services.admin import prune_share_history
 from media_uploader.services.storage import UploadStorage
@@ -27,6 +28,7 @@ from media_uploader.services.storage import UploadStorage
 def create_app(
     config_overrides: Mapping[str, Any] | None = None,
     redis_client: Any | None = None,
+    r2_client: Any | None = None,
 ) -> Flask:
     app = Flask(__name__)
     app.config.from_object(Config)
@@ -54,6 +56,7 @@ def create_app(
         )
 
     init_redis(app, redis_client)
+    init_r2(app, r2_client)
     app.extensions["upload_storage"] = UploadStorage(Path(app.config["UPLOAD_FOLDER"]))
     register_audit_hooks(app)
     csrf.init_app(app)
@@ -91,6 +94,9 @@ def validate_config(app: Flask) -> None:
         "VISITOR_RETENTION_DAYS",
         "ADMIN_SESSION_TTL_SECONDS",
         "ADMIN_SHARE_HISTORY_DAYS",
+        "R2_DELIVERY_URL_TTL_SECONDS",
+        "R2_UPLOAD_URL_TTL_SECONDS",
+        "HEALTH_DEPENDENCY_CHECK_INTERVAL_SECONDS",
     )
     for name in positive:
         if int(app.config[name]) <= 0:
@@ -117,6 +123,37 @@ def validate_config(app: Flask) -> None:
         raise RuntimeError("MAX_REQUEST_SIZE must be larger than CHUNK_SIZE to allow multipart overhead")
     if int(app.config["MAX_SESSION_BYTES"]) < int(app.config["MAX_FILE_SIZE"]):
         raise RuntimeError("MAX_SESSION_BYTES must be at least MAX_FILE_SIZE")
+
+    backend = str(app.config.get("STORAGE_BACKEND") or "").strip().lower()
+    if backend not in {"local", "r2"}:
+        raise RuntimeError("STORAGE_BACKEND must be either 'local' or 'r2'")
+    app.config["STORAGE_BACKEND"] = backend
+
+    if backend == "r2":
+        if int(app.config["CHUNK_SIZE"]) < 5 * 1024 * 1024:
+            raise RuntimeError("CHUNK_SIZE must be at least 5 MiB when STORAGE_BACKEND=r2")
+        required = (
+            "R2_ACCOUNT_ID",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY",
+            "R2_BUCKET",
+            "R2_DELIVERY_BASE_URL",
+            "R2_DELIVERY_SECRET",
+        )
+        missing = [name for name in required if not str(app.config.get(name) or "").strip()]
+        if missing:
+            raise RuntimeError(f"Missing R2 configuration: {', '.join(missing)}")
+        delivery = urlsplit(str(app.config["R2_DELIVERY_BASE_URL"]))
+        if delivery.scheme != "https" or not delivery.netloc or delivery.path not in {"", "/"}:
+            raise RuntimeError("R2_DELIVERY_BASE_URL must be an HTTPS origin without a path")
+        if len(str(app.config["R2_DELIVERY_SECRET"])) < 32:
+            raise RuntimeError("R2_DELIVERY_SECRET must be at least 32 characters")
+
+    if app.config.get("UPLOAD_AUTH_ENABLED"):
+        if not str(app.config.get("UPLOAD_AUTH_USERNAME") or "").strip():
+            raise RuntimeError("UPLOAD_AUTH_USERNAME must be set when UPLOAD_AUTH_ENABLED is true")
+        if not str(app.config.get("UPLOAD_AUTH_PASSWORD_HASH") or "").strip():
+            raise RuntimeError("UPLOAD_AUTH_PASSWORD_HASH must be set when UPLOAD_AUTH_ENABLED is true")
 
     required_chunks = (int(app.config["MAX_FILE_SIZE"]) + int(app.config["CHUNK_SIZE"]) - 1) // int(
         app.config["CHUNK_SIZE"]
@@ -151,6 +188,11 @@ def register_audit_hooks(app: Flask) -> None:
 
 
 def register_security_headers(app: Flask) -> None:
+    media_origin = "'self'"
+    if app.config.get("STORAGE_BACKEND") == "r2":
+        parsed = urlsplit(str(app.config["R2_DELIVERY_BASE_URL"]))
+        media_origin = f"'self' {parsed.scheme}://{parsed.netloc}"
+
     @app.after_request
     def add_security_headers(response: Response) -> Response:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -165,8 +207,9 @@ def register_security_headers(app: Flask) -> None:
             )
         response.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self'; "
-            "script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; "
+            f"default-src 'self'; img-src {media_origin} data:; media-src {media_origin}; "
+            f"style-src 'self'; script-src 'self'; connect-src {media_origin}; "
+            "object-src 'none'; base-uri 'self'; "
             "frame-ancestors 'none'; form-action 'self'",
         )
         return response
@@ -176,14 +219,18 @@ def register_cli(app: Flask) -> None:
     @app.cli.command("cleanup-uploads")
     def cleanup_uploads() -> None:
         """Remove expired upload sessions and shares from disk."""
-        storage: UploadStorage = app.extensions["upload_storage"]
-        result = storage.cleanup_expired()
+        if app.config["STORAGE_BACKEND"] == "local":
+            storage: UploadStorage = app.extensions["upload_storage"]
+            result = storage.cleanup_expired()
+            cleanup_status = (
+                f"Removed {result['sessions']} expired sessions and {result['shares']} expired shares; "
+                f"{result['errors']} cleanup errors."
+            )
+        else:
+            cleanup_status = "R2 object cleanup is handled by the bucket lifecycle rule."
         try:
             pruned = prune_share_history(app.extensions["redis"])
             registry_status = f" Pruned {pruned} expired share-history records."
         except redis.RedisError:
             registry_status = " Share-history indexes were not pruned because Redis is unavailable."
-        click.echo(
-            f"Removed {result['sessions']} expired sessions and {result['shares']} expired shares; "
-            f"{result['errors']} cleanup errors.{registry_status}"
-        )
+        click.echo(f"{cleanup_status}{registry_status}")

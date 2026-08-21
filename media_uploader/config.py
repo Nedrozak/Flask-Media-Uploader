@@ -35,7 +35,17 @@ class Config:
     LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
     REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "local").strip().lower()
     UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", str(PROJECT_ROOT / "uploads"))
+
+    R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "")
+    R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
+    R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+    R2_BUCKET = os.environ.get("R2_BUCKET", "")
+    R2_DELIVERY_BASE_URL = os.environ.get("R2_DELIVERY_BASE_URL", "")
+    R2_DELIVERY_SECRET = os.environ.get("R2_DELIVERY_SECRET", "")
+    R2_DELIVERY_URL_TTL_SECONDS = _env_int("R2_DELIVERY_URL_TTL_SECONDS", 300)
+    R2_UPLOAD_URL_TTL_SECONDS = _env_int("R2_UPLOAD_URL_TTL_SECONDS", 600)
 
     CHUNK_SIZE = _env_int("CHUNK_SIZE", 5 * 1024 * 1024)
     MAX_FILE_SIZE = _env_int("MAX_FILE_SIZE", 1024 * 1024 * 1024)
@@ -73,6 +83,7 @@ class Config:
     SESSION_COOKIE_SAMESITE = "Lax"
     WTF_CSRF_TIME_LIMIT = _env_int("WTF_CSRF_TIME_LIMIT_SECONDS", 12 * 60 * 60)
     HSTS_MAX_AGE = _env_int("HSTS_MAX_AGE", 0)
+    HEALTH_DEPENDENCY_CHECK_INTERVAL_SECONDS = _env_int("HEALTH_DEPENDENCY_CHECK_INTERVAL_SECONDS", 60)
 
     TRUSTED_HOSTS = _env_hosts("TRUSTED_HOSTS")
     PROXY_FIX_X_FOR = _env_int("PROXY_FIX_X_FOR", 0)
@@ -95,6 +106,10 @@ class Config:
     ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
     ADMIN_SESSION_TTL_SECONDS = _env_int("ADMIN_SESSION_TTL_SECONDS", 60 * 60)
     ADMIN_SHARE_HISTORY_DAYS = _env_int("ADMIN_SHARE_HISTORY_DAYS", 365)
+
+    UPLOAD_AUTH_ENABLED = _env_bool("UPLOAD_AUTH_ENABLED", False)
+    UPLOAD_AUTH_USERNAME = os.environ.get("UPLOAD_AUTH_USERNAME", "uploader")
+    UPLOAD_AUTH_PASSWORD_HASH = os.environ.get("UPLOAD_AUTH_PASSWORD_HASH", "")
 
     SEND_FILE_MAX_AGE_DEFAULT = 0
 

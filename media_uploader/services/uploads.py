@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import redis
-from magic import from_file
+from magic import from_buffer, from_file
 
 from media_uploader.services.admin import queue_share_record
 
@@ -108,6 +108,14 @@ def validate_filename(original_name: str, max_length: int, allowed_mime: dict[st
 def detect_mime(file_path: Path) -> str | None:
     try:
         detected = from_file(str(file_path), mime=True)
+        return str(detected) if detected else None
+    except Exception:
+        return None
+
+
+def detect_mime_bytes(content: bytes) -> str | None:
+    try:
+        detected = from_buffer(content, mime=True)
         return str(detected) if detected else None
     except Exception:
         return None
@@ -360,6 +368,72 @@ def complete_transfer(
 
 def read_transfer(client: Any, session_id: str, transfer_id: str) -> dict[str, str]:
     return cast(dict[str, str], client.hgetall(transfer_key(session_id, transfer_id)))
+
+
+def attach_remote_upload(
+    client: Any,
+    session_id: str,
+    transfer_id: str,
+    *,
+    upload_id: str,
+    object_key: str,
+    detected_mime: str,
+    ttl: int,
+) -> tuple[bool, dict[str, str]]:
+    """Attach an R2 multipart upload to a transfer.
+
+    The browser sends chunks for each file sequentially, but retries can still
+    race. HSETNX ensures only one multipart upload wins; callers abort a losing
+    upload and reuse the already-attached one.
+    """
+    key = transfer_key(session_id, transfer_id)
+    attached = bool(client.hsetnx(key, "remote_upload_id", upload_id))
+    if attached:
+        pipe = client.pipeline(transaction=True)
+        pipe.hset(
+            key,
+            mapping={
+                "remote_object_key": object_key,
+                "detected_mime": detected_mime,
+            },
+        )
+        pipe.expire(key, ttl)
+        pipe.execute()
+    transfer = cast(dict[str, str], client.hgetall(key))
+    return attached, transfer
+
+
+def record_remote_part(
+    client: Any,
+    session_id: str,
+    transfer_id: str,
+    part_number: int,
+    etag: str,
+    ttl: int,
+) -> None:
+    key = transfer_key(session_id, transfer_id)
+    pipe = client.pipeline(transaction=True)
+    pipe.hset(key, f"remote_part:{part_number}", etag)
+    pipe.expire(key, ttl)
+    pipe.execute()
+
+
+def remote_parts(
+    client: Any,
+    session_id: str,
+    transfer_id: str,
+    total_chunks: int,
+) -> list[dict[str, int | str]] | None:
+    key = transfer_key(session_id, transfer_id)
+    fields = [f"remote_part:{index}" for index in range(1, total_chunks + 1)]
+    values = client.hmget(key, fields)
+    if len(values) != total_chunks or any(not value for value in values):
+        return None
+    parts: list[dict[str, int | str]] = []
+    for index, value in enumerate(values, start=1):
+        normalized_etag = str(value).strip().strip('"')
+        parts.append({"PartNumber": index, "ETag": f'"{normalized_etag}"'})
+    return parts
 
 
 def prepare_finalize(

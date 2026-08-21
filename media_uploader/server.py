@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from urllib.parse import urlsplit
 
 import redis
@@ -42,7 +43,8 @@ def main() -> None:
     except RuntimeError as exc:
         logger.critical("%s", exc)
         raise SystemExit(1) from exc
-    serve(app, host="0.0.0.0", port=5000, threads=6)
+    port = int(os.environ.get("PORT", "5000"))
+    serve(app, host="0.0.0.0", port=port, threads=6)
 
 
 if __name__ == "__main__":

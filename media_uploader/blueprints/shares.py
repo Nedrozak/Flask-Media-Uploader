@@ -3,12 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 import redis
-from flask import Blueprint, Response, abort, current_app, g, render_template, request, send_file, url_for
+from flask import Blueprint, Response, abort, current_app, g, redirect, render_template, request, send_file, url_for
 
 from media_uploader.audit import audit_event, fingerprint
 from media_uploader.extensions import get_redis
 from media_uploader.responses import json_error
 from media_uploader.services.admin import ensure_share_record, record_share_activity
+from media_uploader.services.r2_storage import R2Storage, R2StorageError
 from media_uploader.services.storage import UploadStorage
 from media_uploader.services.uploads import InvalidUpload, load_share, validate_hex_id
 
@@ -59,7 +60,6 @@ def summary(token: str) -> Response | tuple[Response, int]:
         abort(404)
 
     payload, ttl = loaded
-    storage: UploadStorage = current_app.extensions["upload_storage"]
     image_exts = current_app.config["PREVIEW_IMAGE_EXTENSIONS"]
     video_exts = current_app.config["PREVIEW_VIDEO_EXTENSIONS"]
     files: list[dict[str, Any]] = []
@@ -69,13 +69,25 @@ def summary(token: str) -> Response | tuple[Response, int]:
         file_id = item.get("file_id")
         if not isinstance(file_id, str):
             continue
-        try:
-            path = storage.shared_file(token, file_id)
-        except ValueError:
-            continue
-        if not path.is_file():
-            current_app.logger.warning("Share %s references missing file %s", _share_fingerprint(token), file_id)
-            continue
+        if current_app.config["STORAGE_BACKEND"] == "r2":
+            object_key = item.get("object_key")
+            if not isinstance(object_key, str) or not object_key:
+                continue
+            try:
+                stored_size = current_app.extensions["r2_storage"].object_size(object_key)
+            except R2StorageError:
+                current_app.logger.exception("R2 unavailable while loading share %s", _share_fingerprint(token))
+                return json_error("service_unavailable", "The share storage is temporarily unavailable.", 503)
+        else:
+            storage: UploadStorage = current_app.extensions["upload_storage"]
+            try:
+                path = storage.shared_file(token, file_id)
+            except ValueError:
+                continue
+            if not path.is_file():
+                current_app.logger.warning("Share %s references missing file %s", _share_fingerprint(token), file_id)
+                continue
+            stored_size = path.stat().st_size
 
         extension = str(item.get("extension", "")).lower()
         preview_kind = "image" if extension in image_exts else "video" if extension in video_exts else None
@@ -83,7 +95,7 @@ def summary(token: str) -> Response | tuple[Response, int]:
             {
                 "file_id": file_id,
                 "name": str(item.get("name", "file")),
-                "size": int(item.get("size", path.stat().st_size)),
+                "size": int(item.get("size", stored_size)),
                 "mime": str(item.get("mime", "application/octet-stream")),
                 "sha256": str(item.get("sha256", "")),
                 "preview_kind": preview_kind,
@@ -137,13 +149,51 @@ def shared_file(token: str, file_id: str) -> Response | tuple[Response, int]:
         audit_event("shared_file_denied", share=_share_fingerprint(token), file_id=file_id, reason="file_not_in_share")
         abort(404)
 
+    is_download = request.args.get("download") == "1"
+    if current_app.config["STORAGE_BACKEND"] == "r2":
+        object_key = metadata.get("object_key")
+        if not isinstance(object_key, str) or not object_key:
+            audit_event(
+                "shared_file_denied",
+                share=_share_fingerprint(token),
+                file_id=file_id,
+                reason="missing_storage",
+            )
+            abort(404)
+        r2: R2Storage = current_app.extensions["r2_storage"]
+        try:
+            if r2.object_size(object_key) < 0:
+                abort(404)
+            target = r2.delivery_url(
+                key=object_key,
+                filename=str(metadata.get("name", "download")),
+                download=is_download,
+                share_expires_at=int(payload.get("expires_at", 0)),
+            )
+        except R2StorageError:
+            current_app.logger.exception("R2 unavailable while authorizing shared file")
+            return json_error("service_unavailable", "The share storage is temporarily unavailable.", 503)
+
+        audit_event(
+            "shared_file_downloaded" if is_download else "shared_file_viewed",
+            share=_share_fingerprint(token),
+            file_id=file_id,
+            filename=str(metadata.get("name", "download")),
+            size=int(metadata.get("size", 0)),
+            mime=str(metadata.get("mime", "application/octet-stream")),
+            sha256=str(metadata.get("sha256", "")),
+        )
+        _record_activity(token, "download" if is_download else "preview", payload)
+        response = redirect(target, code=302)
+        response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        return response
+
     storage: UploadStorage = current_app.extensions["upload_storage"]
     path = storage.shared_file(token, file_id)
     if not path.is_file():
         audit_event("shared_file_denied", share=_share_fingerprint(token), file_id=file_id, reason="missing_storage")
         abort(404)
 
-    is_download = request.args.get("download") == "1"
     audit_event(
         "shared_file_downloaded" if is_download else "shared_file_viewed",
         share=_share_fingerprint(token),

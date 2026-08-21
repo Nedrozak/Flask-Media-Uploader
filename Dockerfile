@@ -24,6 +24,6 @@ USER app
 EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import os, urllib.request; host=(os.getenv('TRUSTED_HOSTS') or 'localhost').split(',')[0]; request=urllib.request.Request('http://127.0.0.1:5000/healthz', headers={'Host': host}); urllib.request.urlopen(request, timeout=3).read()" || exit 1
+  CMD python -c "import os, urllib.request; host=(os.getenv('TRUSTED_HOSTS') or 'localhost').split(',')[0]; port=os.getenv('PORT', '5000'); request=urllib.request.Request(f'http://127.0.0.1:{port}/healthz', headers={'Host': host}); urllib.request.urlopen(request, timeout=3).read()" || exit 1
 
 CMD ["media-uploader"]

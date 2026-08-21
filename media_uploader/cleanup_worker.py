@@ -21,16 +21,17 @@ def _stop(*_: object) -> None:
 
 
 def cleanup_once(app: Flask) -> tuple[dict[str, int], int]:
-    storage: UploadStorage = app.extensions["upload_storage"]
     result = {"sessions": 0, "shares": 0, "errors": 0}
-    try:
-        result = storage.cleanup_expired()
-        if result["sessions"] or result["shares"]:
-            logger.info("Expired upload cleanup: %s", result)
-        if result["errors"]:
-            logger.warning("Expired upload cleanup had %d filesystem errors", result["errors"])
-    except OSError:
-        logger.exception("Expired upload cleanup failed")
+    if app.config["STORAGE_BACKEND"] == "local":
+        storage: UploadStorage = app.extensions["upload_storage"]
+        try:
+            result = storage.cleanup_expired()
+            if result["sessions"] or result["shares"]:
+                logger.info("Expired upload cleanup: %s", result)
+            if result["errors"]:
+                logger.warning("Expired upload cleanup had %d filesystem errors", result["errors"])
+        except OSError:
+            logger.exception("Expired upload cleanup failed")
 
     pruned = 0
     try:

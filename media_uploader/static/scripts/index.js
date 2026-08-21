@@ -31,6 +31,7 @@
     concurrency: Math.max(1, Number(form.dataset.concurrency) || 3),
     timeoutMs: Math.max(1000, Number(form.dataset.requestTimeoutMs) || 180000),
     retries: Math.max(0, Number(form.dataset.chunkRetries) || 0),
+    storageBackend: form.dataset.storageBackend || "local",
     allowedExtensions: new Set((form.dataset.allowedExtensions || "").split(",").filter(Boolean)),
   };
 
@@ -295,24 +296,38 @@
       const start = chunkIndex * config.chunkSize;
       const end = Math.min(start + config.chunkSize, file.size);
       const blob = file.slice(start, end);
-      const formData = new FormData();
-      formData.append("session_id", config.sessionId);
-      formData.append("original_filename", file.name);
-      formData.append("fileUuid", transferId);
-      formData.append("file_size", String(file.size));
-      formData.append("chunk_index", String(chunkIndex));
-      formData.append("total_chunks", String(totalChunks));
-      formData.append("chunk", blob, "chunk.bin");
+      let result;
+      if (config.storageBackend === "r2") {
+        result = await sendR2ChunkWithRetry(
+          file,
+          blob,
+          transferId,
+          chunkIndex,
+          totalChunks,
+          bar,
+          info,
+          startedAt
+        );
+      } else {
+        const formData = new FormData();
+        formData.append("session_id", config.sessionId);
+        formData.append("original_filename", file.name);
+        formData.append("fileUuid", transferId);
+        formData.append("file_size", String(file.size));
+        formData.append("chunk_index", String(chunkIndex));
+        formData.append("total_chunks", String(totalChunks));
+        formData.append("chunk", blob, "chunk.bin");
 
-      const result = await sendChunkWithRetry(
-        formData,
-        file,
-        chunkIndex,
-        totalChunks,
-        bar,
-        info,
-        startedAt
-      );
+        result = await sendChunkWithRetry(
+          formData,
+          file,
+          chunkIndex,
+          totalChunks,
+          bar,
+          info,
+          startedAt
+        );
+      }
       if (result.status === "success") {
         bar.value = 100;
         bar.textContent = "100%";
@@ -325,6 +340,144 @@
         throw new Error("The server did not confirm that all file chunks were received. Retry the upload.");
       }
     }
+  }
+
+  async function sendR2ChunkWithRetry(file, blob, transferId, chunkIndex, totalChunks, bar, info, startedAt) {
+    let lastError;
+    for (let attempt = 0; attempt <= config.retries; attempt += 1) {
+      try {
+        const prepared = await prepareR2Part(file, transferId, chunkIndex, totalChunks);
+        if (prepared.status === "success") return prepared;
+        if (prepared.status !== "ready" || typeof prepared.upload_url !== "string") {
+          throw Object.assign(new Error("Upload server did not return an R2 part URL."), { retryable: true });
+        }
+
+        const uploadedPart = await sendR2PartXHR(
+          prepared.upload_url,
+          blob,
+          file,
+          chunkIndex,
+          totalChunks,
+          bar,
+          info,
+          startedAt
+        );
+        return await commitR2Part(file, transferId, chunkIndex, totalChunks, uploadedPart.etag);
+      } catch (error) {
+        lastError = error;
+        if (canceled || !error.retryable || attempt === config.retries) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+      }
+    }
+    throw lastError;
+  }
+
+  async function prepareR2Part(file, transferId, chunkIndex, totalChunks) {
+    const formData = new FormData();
+    formData.append("session_id", config.sessionId);
+    formData.append("original_filename", file.name);
+    formData.append("fileUuid", transferId);
+    formData.append("file_size", String(file.size));
+    formData.append("chunk_index", String(chunkIndex));
+    formData.append("total_chunks", String(totalChunks));
+    if (chunkIndex === 0) {
+      const probe = file.slice(0, Math.min(file.size, 64 * 1024));
+      formData.append("probe", probe, "probe.bin");
+    }
+
+    const response = await fetch("/api/uploads/r2/prepare-part", {
+      method: "POST",
+      headers: { "X-CSRFToken": csrfToken() },
+      body: formData,
+    });
+    return await responseJsonOrError(response, "Could not prepare the R2 upload.");
+  }
+
+  function sendR2PartXHR(uploadUrl, blob, file, chunkIndex, totalChunks, bar, info, startedAt) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      activeRequests.add(xhr);
+      xhr.open("PUT", uploadUrl, true);
+      xhr.timeout = config.timeoutMs;
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+      xhr.upload.addEventListener("progress", (event) => {
+        if (!event.lengthComputable) return;
+        const currentBytes = Math.min(file.size, chunkIndex * config.chunkSize + event.loaded);
+        const percent = Math.min(100, (currentBytes / file.size) * 100);
+        bar.value = percent;
+        bar.textContent = `${Math.floor(percent)}%`;
+        const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
+        const speed = currentBytes / elapsed;
+        const eta = speed > 0 ? (file.size - currentBytes) / speed : 0;
+        info.textContent = `${formatBytes(speed)}/s • ETA ${formatDuration(eta)} • chunk ${chunkIndex + 1}/${totalChunks}`;
+      });
+
+      xhr.addEventListener("load", () => {
+        activeRequests.delete(xhr);
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const body = JSON.parse(xhr.responseText);
+            if (!body || typeof body.etag !== "string") throw new Error("missing R2 ETag");
+            resolve(body);
+          } catch (_) {
+            const error = new Error("R2 returned an invalid upload response.");
+            error.retryable = true;
+            reject(error);
+          }
+          return;
+        }
+        const error = new Error(xhr.responseText || `R2 upload failed (${xhr.status})`);
+        error.retryable = xhr.status === 400 || xhr.status === 403 || xhr.status === 429 || xhr.status >= 500;
+        reject(error);
+      });
+      xhr.addEventListener("error", () => {
+        activeRequests.delete(xhr);
+        const error = new Error("Network error while uploading to R2");
+        error.retryable = true;
+        reject(error);
+      });
+      xhr.addEventListener("timeout", () => {
+        activeRequests.delete(xhr);
+        const error = new Error("R2 upload request timed out");
+        error.retryable = true;
+        reject(error);
+      });
+      xhr.addEventListener("abort", () => {
+        activeRequests.delete(xhr);
+        const error = new Error("Canceled");
+        error.retryable = false;
+        reject(error);
+      });
+      xhr.send(blob);
+    });
+  }
+
+  async function commitR2Part(file, transferId, chunkIndex, totalChunks, etag) {
+    const response = await fetch("/api/uploads/r2/commit-part", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": csrfToken(),
+      },
+      body: JSON.stringify({
+        session_id: config.sessionId,
+        fileUuid: transferId,
+        file_size: file.size,
+        chunk_index: chunkIndex,
+        total_chunks: totalChunks,
+        etag,
+      }),
+    });
+    return await responseJsonOrError(response, "Could not commit the uploaded R2 part.");
+  }
+
+  async function responseJsonOrError(response, fallbackMessage) {
+    const body = await response.json().catch(() => ({}));
+    if (response.ok) return body;
+    const error = new Error(body?.error?.message || body?.error || fallbackMessage);
+    error.retryable = response.status === 409 || response.status === 429 || response.status >= 500;
+    throw error;
   }
 
   async function sendChunkWithRetry(formData, file, chunkIndex, totalChunks, bar, info, startedAt) {

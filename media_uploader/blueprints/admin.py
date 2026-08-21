@@ -28,6 +28,7 @@ from media_uploader.audit import audit_event, fingerprint
 from media_uploader.extensions import get_redis
 from media_uploader.security import rate_limit
 from media_uploader.services.admin import get_share_record, list_share_records, revoke_share
+from media_uploader.services.r2_storage import R2Storage, R2StorageError
 from media_uploader.services.storage import UploadStorage
 from media_uploader.services.uploads import InvalidUpload, validate_hex_id
 
@@ -247,18 +248,39 @@ def revoke(token: str) -> Response:
         abort(404)
 
     visitor = getattr(g, "visitor_fingerprint", None)
+    record: dict[str, Any] | None = None
     try:
+        if current_app.config["STORAGE_BACKEND"] == "r2":
+            record = get_share_record(get_redis(), token)
         if not revoke_share(get_redis(), token, visitor):
             abort(404)
     except redis.RedisError:
         current_app.logger.exception("Could not revoke share")
         abort(503)
 
-    storage: UploadStorage = current_app.extensions["upload_storage"]
-    try:
-        storage.delete_share(token)
-    except OSError:
-        current_app.logger.warning("Share was revoked but its files could not be removed immediately", exc_info=True)
+    if current_app.config["STORAGE_BACKEND"] == "r2":
+        keys = []
+        if record is not None:
+            for item in record.get("files", []):
+                if isinstance(item, dict) and isinstance(item.get("object_key"), str):
+                    keys.append(item["object_key"])
+        try:
+            r2: R2Storage = current_app.extensions["r2_storage"]
+            r2.delete_objects(keys)
+        except R2StorageError:
+            current_app.logger.warning(
+                "Share was revoked but its R2 files could not be removed immediately",
+                exc_info=True,
+            )
+    else:
+        storage: UploadStorage = current_app.extensions["upload_storage"]
+        try:
+            storage.delete_share(token)
+        except OSError:
+            current_app.logger.warning(
+                "Share was revoked but its files could not be removed immediately",
+                exc_info=True,
+            )
 
     audit_event("admin_share_revoked", share=fingerprint(token))
     return redirect(url_for("admin.share_detail", token=token))

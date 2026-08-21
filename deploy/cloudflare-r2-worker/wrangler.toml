@@ -1,0 +1,7 @@
+name = "media-uploader-delivery"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "REPLACE_WITH_YOUR_R2_BUCKET_NAME"

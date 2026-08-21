@@ -10,7 +10,8 @@ from flask_wtf.csrf import generate_csrf
 from media_uploader.audit import audit_event, fingerprint
 from media_uploader.extensions import get_redis
 from media_uploader.responses import json_error
-from media_uploader.security import rate_limit
+from media_uploader.security import rate_limit, upload_auth_required
+from media_uploader.services.r2_storage import R2Storage, R2StorageError
 from media_uploader.services.storage import StorageCapacityError, UploadStorage
 from media_uploader.services.uploads import create_session
 
@@ -27,18 +28,21 @@ def human_readable_size(num_bytes: int) -> str:
 
 
 @bp.get("/")
+@upload_auth_required
 @rate_limit("session-create", "RATE_LIMIT_SESSION_CREATES")
 def index() -> Response | tuple[Response, int]:
     session_id = uuid.uuid4().hex
     ttl = int(current_app.config["SESSION_EXPIRY_SECONDS"])
     try:
-        storage: UploadStorage = current_app.extensions["upload_storage"]
-        storage.ensure_capacity(0, int(current_app.config["MIN_FREE_DISK_BYTES"]))
+        if current_app.config["STORAGE_BACKEND"] == "local":
+            storage: UploadStorage = current_app.extensions["upload_storage"]
+            storage.ensure_capacity(0, int(current_app.config["MIN_FREE_DISK_BYTES"]))
         expires_at = create_session(get_redis(), session_id, ttl)
-        storage.ensure_session(
-            session_id,
-            expires_at + int(current_app.config["CLEANUP_EXPIRY_GRACE_SECONDS"]),
-        )
+        if current_app.config["STORAGE_BACKEND"] == "local":
+            storage.ensure_session(
+                session_id,
+                expires_at + int(current_app.config["CLEANUP_EXPIRY_GRACE_SECONDS"]),
+            )
     except redis.RedisError:
         current_app.logger.exception("Could not create upload session")
         return json_error("service_unavailable", "The upload service is temporarily unavailable.", 503)
@@ -71,14 +75,33 @@ def index() -> Response | tuple[Response, int]:
 
 @bp.get("/healthz")
 def healthz() -> tuple[Response, int] | Response:
-    try:
-        get_redis().ping()
-        storage: UploadStorage = current_app.extensions["upload_storage"]
-        if not storage.root.is_dir():
-            raise OSError("upload root is missing")
-        storage.probe_writable()
-        storage.ensure_capacity(0, int(current_app.config["MIN_FREE_DISK_BYTES"]))
-    except (redis.RedisError, OSError, StorageCapacityError):
-        current_app.logger.warning("Health check failed", exc_info=True)
+    now = time.monotonic()
+    interval = int(current_app.config["HEALTH_DEPENDENCY_CHECK_INTERVAL_SECONDS"])
+    cache = current_app.extensions.setdefault(
+        "health_dependency_cache",
+        {"checked_at": 0.0, "healthy": False},
+    )
+    should_probe = now - float(cache["checked_at"]) >= interval
+
+    if should_probe:
+        healthy = False
+        try:
+            get_redis().ping()
+            if current_app.config["STORAGE_BACKEND"] == "r2":
+                r2: R2Storage = current_app.extensions["r2_storage"]
+                r2.probe()
+            else:
+                storage: UploadStorage = current_app.extensions["upload_storage"]
+                if not storage.root.is_dir():
+                    raise OSError("upload root is missing")
+                storage.probe_writable()
+                storage.ensure_capacity(0, int(current_app.config["MIN_FREE_DISK_BYTES"]))
+            healthy = True
+        except (redis.RedisError, OSError, StorageCapacityError, R2StorageError):
+            current_app.logger.warning("Health dependency probe failed", exc_info=True)
+        cache["checked_at"] = now
+        cache["healthy"] = healthy
+
+    if not cache["healthy"]:
         return jsonify({"status": "unhealthy"}), 503
     return jsonify({"status": "ok", "time": int(time.time())})

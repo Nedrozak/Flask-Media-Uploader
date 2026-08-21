@@ -12,7 +12,8 @@ from flask import Blueprint, Response, current_app, g, jsonify, request, url_for
 from media_uploader.audit import audit_event, fingerprint
 from media_uploader.extensions import get_redis
 from media_uploader.responses import json_error
-from media_uploader.security import rate_limit
+from media_uploader.security import rate_limit, upload_auth_required
+from media_uploader.services.r2_storage import R2Storage, R2StorageError
 from media_uploader.services.storage import (
     ChunkSizeError,
     MissingChunksError,
@@ -25,14 +26,18 @@ from media_uploader.services.uploads import (
     TransferSpec,
     UploadError,
     abort_transfer,
+    attach_remote_upload,
     claim_transfer_completion,
     complete_transfer,
     detect_mime,
+    detect_mime_bytes,
     load_finalized_token,
     load_share,
     prepare_finalize,
     publish_share,
     read_transfer,
+    record_remote_part,
+    remote_parts,
     refresh_transfer,
     reserve_transfer,
     reset_transfer,
@@ -57,9 +62,356 @@ def _parse_int_field(name: str) -> int:
         raise InvalidUpload(f"Invalid {name}") from exc
 
 
+def _abort_r2_transfer(client: Any, session_id: str, transfer_id: str, file_size: int) -> None:
+    transfer = read_transfer(client, session_id, transfer_id)
+    upload_id = transfer.get("remote_upload_id")
+    object_key = transfer.get("remote_object_key")
+    if upload_id and object_key:
+        try:
+            r2: R2Storage = current_app.extensions["r2_storage"]
+            r2.abort_multipart_upload(key=object_key, upload_id=upload_id)
+        except R2StorageError:
+            # The bucket lifecycle rule is the final safety net for orphaned
+            # multipart uploads if an abort request itself fails.
+            current_app.logger.warning("Could not abort rejected R2 multipart upload", exc_info=True)
+    abort_transfer(client, session_id, transfer_id, file_size)
+
+
+def _r2_upload_spec_from_form() -> tuple[str, str, str, str, int, int, int, int]:
+    session_id = validate_hex_id(request.form.get("session_id"), "session_id")
+    transfer_id = validate_hex_id(request.form.get("fileUuid"), "fileUuid")
+    original_name = request.form.get("original_filename", "")
+    if not original_name:
+        raise InvalidUpload("Missing original_filename")
+
+    allowed_mime: dict[str, set[str]] = current_app.config["ALLOWED_MIME_BY_EXTENSION"]
+    filename, extension = validate_filename(
+        original_name,
+        int(current_app.config["MAX_FILENAME_LENGTH"]),
+        allowed_mime,
+    )
+    file_size = _parse_int_field("file_size")
+    chunk_index = _parse_int_field("chunk_index")
+    total_chunks = _parse_int_field("total_chunks")
+    chunk_size = int(current_app.config["CHUNK_SIZE"])
+
+    if file_size <= 0 or file_size > int(current_app.config["MAX_FILE_SIZE"]):
+        raise InvalidUpload("File size is outside the allowed range")
+    expected_total = math.ceil(file_size / chunk_size)
+    if total_chunks != expected_total or total_chunks < 1:
+        raise InvalidUpload("total_chunks does not match the declared file size")
+    if total_chunks > int(current_app.config["MAX_CHUNKS_PER_FILE"]):
+        raise InvalidUpload("Too many chunks for one file")
+    if chunk_index < 0 or chunk_index >= total_chunks:
+        raise InvalidUpload("chunk_index is outside the valid range")
+    expected_chunk_size = min(chunk_size, file_size - (chunk_index * chunk_size))
+    if expected_chunk_size <= 0:
+        raise InvalidUpload("Invalid chunk size")
+
+    return (
+        session_id,
+        transfer_id,
+        filename,
+        extension,
+        file_size,
+        chunk_index,
+        total_chunks,
+        expected_chunk_size,
+    )
+
+
+def _complete_r2_transfer(
+    *,
+    client: Any,
+    session_id: str,
+    transfer_id: str,
+    file_size: int,
+    total_chunks: int,
+    ttl: int,
+) -> tuple[Response, int] | Response:
+    transfer = read_transfer(client, session_id, transfer_id)
+    upload_id = transfer.get("remote_upload_id")
+    object_key = transfer.get("remote_object_key")
+    detected_mime = transfer.get("detected_mime")
+    filename = transfer.get("filename")
+    extension = transfer.get("extension")
+    if not upload_id or not object_key or not detected_mime or not filename or not extension:
+        raise InvalidUpload("Remote upload state is incomplete")
+
+    parts = remote_parts(client, session_id, transfer_id, total_chunks)
+    if parts is None:
+        return jsonify({"status": "chunk_received"})
+
+    claim_state, claim_id = claim_transfer_completion(client, session_id, transfer_id, ttl)
+    if claim_state == "completed":
+        return jsonify({"status": "success", "already_completed": True})
+    if claim_state != "claimed" or claim_id is None:
+        return json_error("transfer_busy", "This file is currently being finalized.", 409)
+
+    r2: R2Storage = current_app.extensions["r2_storage"]
+    file_id = uuid.uuid4().hex
+    object_completed = False
+    metadata: dict[str, Any] = {
+        "transfer_id": transfer_id,
+        "file_id": file_id,
+        "object_key": object_key,
+        "name": filename,
+        "extension": extension,
+        "mime": detected_mime,
+        "size": file_size,
+        # Multipart ETags provide per-part integrity. A whole-file SHA-256 would
+        # require reading the completed object again, so R2 mode leaves it blank.
+        "sha256": "",
+    }
+    try:
+        etag = r2.complete_multipart_upload(key=object_key, upload_id=upload_id, parts=parts)
+        object_completed = True
+        metadata["etag"] = etag
+        if not complete_transfer(client, session_id, transfer_id, claim_id, metadata, ttl):
+            r2.delete_object(object_key)
+            return json_error(
+                "transfer_lease_lost",
+                "This file finalization was superseded by a newer retry. Retry the upload.",
+                409,
+            )
+
+        audit_event(
+            "upload_file_completed",
+            session=fingerprint(session_id),
+            transfer=fingerprint(transfer_id),
+            file_id=file_id,
+            filename=filename,
+            size=file_size,
+            mime=detected_mime,
+            etag=etag,
+            storage="r2",
+        )
+        return jsonify({"status": "success", "file_id": file_id})
+    except redis.RedisError:
+        current_app.logger.exception("Redis failed while completing R2 transfer %s", fingerprint(transfer_id))
+        if object_completed:
+            try:
+                latest = read_transfer(client, session_id, transfer_id)
+                if latest.get("state") == "completed" and latest.get("file_id") == file_id:
+                    return jsonify({"status": "success", "file_id": file_id, "recovered": True})
+                if (
+                    latest.get("state") == "finalizing"
+                    and latest.get("finalizing_claim") == claim_id
+                    and complete_transfer(client, session_id, transfer_id, claim_id, metadata, ttl)
+                ):
+                    return jsonify({"status": "success", "file_id": file_id, "recovered": True})
+            except (redis.RedisError, UploadError):
+                current_app.logger.warning("Could not resolve ambiguous R2 completion", exc_info=True)
+        else:
+            try:
+                reset_transfer(client, session_id, transfer_id, claim_id, ttl)
+            except redis.RedisError:
+                current_app.logger.warning("Could not reset transfer after Redis failure", exc_info=True)
+        return json_error("service_unavailable", "The upload service is temporarily unavailable.", 503)
+    except R2StorageError:
+        current_app.logger.exception("R2 failed while finalizing transfer %s", fingerprint(transfer_id))
+        if not object_completed:
+            try:
+                reset_transfer(client, session_id, transfer_id, claim_id, ttl)
+            except redis.RedisError:
+                current_app.logger.warning("Could not reset transfer after R2 error", exc_info=True)
+        return json_error("storage_error", "The uploaded file could not be stored.", 503)
+
+
+@bp.post("/r2/prepare-part")
+@upload_auth_required
+@rate_limit("upload-r2-prepare", "RATE_LIMIT_UPLOAD_CHUNKS")
+def prepare_r2_part() -> tuple[Response, int] | Response:
+    if current_app.config["STORAGE_BACKEND"] != "r2":
+        return json_error("unsupported_storage_backend", "Direct R2 uploads are not enabled.", 404)
+
+    reserved = False
+    client: Any | None = None
+    session_id = transfer_id = ""
+    file_size = 0
+    try:
+        (
+            session_id,
+            transfer_id,
+            filename,
+            extension,
+            file_size,
+            chunk_index,
+            total_chunks,
+            expected_chunk_size,
+        ) = _r2_upload_spec_from_form()
+        client = get_redis()
+        ttl = int(current_app.config["SESSION_EXPIRY_SECONDS"])
+        state = reserve_transfer(
+            client,
+            session_id,
+            TransferSpec(
+                transfer_id=transfer_id,
+                filename=filename,
+                extension=extension,
+                file_size=file_size,
+                total_chunks=total_chunks,
+            ),
+            ttl,
+            int(current_app.config["MAX_FILES_PER_SESSION"]),
+            int(current_app.config["MAX_SESSION_BYTES"]),
+            int(current_app.config["TRANSFER_FINALIZE_TIMEOUT_SECONDS"]),
+        )
+        if state == "completed":
+            return jsonify({"status": "success", "already_completed": True})
+        if state != "reserved":
+            return json_error("transfer_busy", "This file is currently being finalized.", 409)
+        reserved = True
+
+        transfer = read_transfer(client, session_id, transfer_id)
+        upload_id = transfer.get("remote_upload_id")
+        object_key = transfer.get("remote_object_key")
+        detected_mime = transfer.get("detected_mime")
+        allowed_mime: dict[str, set[str]] = current_app.config["ALLOWED_MIME_BY_EXTENSION"]
+
+        if chunk_index == 0:
+            probe = request.files.get("probe")
+            if probe is None:
+                raise InvalidUpload("Missing file type probe")
+            max_probe = 64 * 1024
+            probe_data = probe.stream.read(max_probe + 1)
+            if not probe_data or len(probe_data) > max_probe:
+                raise InvalidUpload("Invalid file type probe")
+            probed_mime = detect_mime_bytes(probe_data)
+            if probed_mime not in allowed_mime[extension]:
+                raise InvalidUpload("Detected file type does not match the filename extension")
+            if detected_mime and detected_mime != probed_mime:
+                raise InvalidUpload("File contents changed during an upload retry")
+            detected_mime = probed_mime
+
+            if not upload_id or not object_key:
+                r2: R2Storage = current_app.extensions["r2_storage"]
+                proposed_key, proposed_upload_id = r2.create_multipart_upload(
+                    session_id=session_id,
+                    transfer_id=transfer_id,
+                    filename=filename,
+                    mime=detected_mime,
+                )
+                attached, transfer = attach_remote_upload(
+                    client,
+                    session_id,
+                    transfer_id,
+                    upload_id=proposed_upload_id,
+                    object_key=proposed_key,
+                    detected_mime=detected_mime,
+                    ttl=ttl,
+                )
+                if not attached:
+                    try:
+                        r2.abort_multipart_upload(key=proposed_key, upload_id=proposed_upload_id)
+                    except R2StorageError:
+                        current_app.logger.warning("Could not abort losing R2 multipart upload", exc_info=True)
+                upload_id = transfer.get("remote_upload_id")
+                object_key = transfer.get("remote_object_key")
+                detected_mime = transfer.get("detected_mime")
+        elif not upload_id or not object_key or not detected_mime:
+            raise InvalidUpload("Upload must begin with the first chunk")
+
+        if not upload_id or not object_key or not detected_mime:
+            raise R2StorageError("R2 multipart upload state is incomplete")
+
+        r2 = current_app.extensions["r2_storage"]
+        upload_url = r2.part_upload_url(
+            key=object_key,
+            upload_id=upload_id,
+            part_number=chunk_index + 1,
+            expected_size=expected_chunk_size,
+            ttl_seconds=int(current_app.config["R2_UPLOAD_URL_TTL_SECONDS"]),
+        )
+        refresh_transfer(client, session_id, transfer_id, ttl)
+        return jsonify({"status": "ready", "upload_url": upload_url})
+    except InvalidUpload as exc:
+        if reserved and client is not None:
+            try:
+                _abort_r2_transfer(client, session_id, transfer_id, file_size)
+            except (redis.RedisError, UploadError):
+                current_app.logger.warning("Could not clean rejected R2 transfer", exc_info=True)
+        return _error_from_upload(exc)
+    except UploadError as exc:
+        return _error_from_upload(exc)
+    except redis.RedisError:
+        current_app.logger.exception("Redis unavailable while preparing R2 part")
+        return json_error("service_unavailable", "The upload service is temporarily unavailable.", 503)
+    except R2StorageError:
+        current_app.logger.exception("R2 unavailable while preparing upload part")
+        return json_error("storage_unavailable", "Object storage is temporarily unavailable.", 503)
+
+
+@bp.post("/r2/commit-part")
+@upload_auth_required
+@rate_limit("upload-r2-commit", "RATE_LIMIT_UPLOAD_CHUNKS")
+def commit_r2_part() -> tuple[Response, int] | Response:
+    if current_app.config["STORAGE_BACKEND"] != "r2":
+        return json_error("unsupported_storage_backend", "Direct R2 uploads are not enabled.", 404)
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return json_error("invalid_json", "A JSON object is required.", 400)
+    try:
+        session_id = validate_hex_id(data.get("session_id"), "session_id")
+        transfer_id = validate_hex_id(data.get("fileUuid"), "fileUuid")
+        try:
+            file_size = int(data.get("file_size"))
+            chunk_index = int(data.get("chunk_index"))
+            total_chunks = int(data.get("total_chunks"))
+        except (TypeError, ValueError) as exc:
+            raise InvalidUpload("Invalid chunk metadata") from exc
+        etag = str(data.get("etag") or "").strip().strip('"').lower()
+        if len(etag) != 32 or any(char not in "0123456789abcdef" for char in etag):
+            raise InvalidUpload("Invalid R2 part ETag")
+        if chunk_index < 0 or chunk_index >= total_chunks:
+            raise InvalidUpload("chunk_index is outside the valid range")
+
+        client = get_redis()
+        ttl = int(current_app.config["SESSION_EXPIRY_SECONDS"])
+        transfer = read_transfer(client, session_id, transfer_id)
+        if not transfer:
+            raise InvalidUpload("Unknown file transfer")
+        if transfer.get("state") == "completed":
+            return jsonify({"status": "success", "already_completed": True})
+        if transfer.get("state", "reserved") != "reserved":
+            return json_error("transfer_busy", "This file is currently being finalized.", 409)
+        if int(transfer.get("file_size", -1)) != file_size or int(transfer.get("total_chunks", -1)) != total_chunks:
+            raise InvalidUpload("Upload metadata changed for an existing transfer")
+        if not transfer.get("remote_upload_id") or not transfer.get("remote_object_key"):
+            raise InvalidUpload("Remote upload state is incomplete")
+
+        record_remote_part(client, session_id, transfer_id, chunk_index + 1, etag, ttl)
+        refresh_transfer(client, session_id, transfer_id, ttl)
+        return _complete_r2_transfer(
+            client=client,
+            session_id=session_id,
+            transfer_id=transfer_id,
+            file_size=file_size,
+            total_chunks=total_chunks,
+            ttl=ttl,
+        )
+    except UploadError as exc:
+        return _error_from_upload(exc)
+    except redis.RedisError:
+        current_app.logger.exception("Redis unavailable while committing R2 part")
+        return json_error("service_unavailable", "The upload service is temporarily unavailable.", 503)
+    except R2StorageError:
+        current_app.logger.exception("R2 unavailable while committing upload part")
+        return json_error("storage_unavailable", "Object storage is temporarily unavailable.", 503)
+
+
 @bp.post("/chunks")
+@upload_auth_required
 @rate_limit("upload-chunk", "RATE_LIMIT_UPLOAD_CHUNKS")
 def upload_chunk() -> tuple[Response, int] | Response:
+    if current_app.config["STORAGE_BACKEND"] == "r2":
+        return json_error(
+            "direct_upload_required",
+            "This deployment uploads chunks directly to Cloudflare R2.",
+            409,
+        )
+
     try:
         session_id = validate_hex_id(request.form.get("session_id"), "session_id")
         transfer_id = validate_hex_id(request.form.get("fileUuid"), "fileUuid")
@@ -98,7 +450,8 @@ def upload_chunk() -> tuple[Response, int] | Response:
 
         storage: UploadStorage = current_app.extensions["upload_storage"]
         min_free_disk = int(current_app.config["MIN_FREE_DISK_BYTES"])
-        storage.ensure_capacity(expected_chunk_size, min_free_disk)
+        if current_app.config["STORAGE_BACKEND"] == "local":
+            storage.ensure_capacity(expected_chunk_size, min_free_disk)
 
         spec = TransferSpec(
             transfer_id=transfer_id,
@@ -295,6 +648,9 @@ def upload_chunk() -> tuple[Response, int] | Response:
     except redis.RedisError:
         current_app.logger.exception("Redis unavailable during upload")
         return json_error("service_unavailable", "The upload service is temporarily unavailable.", 503)
+    except R2StorageError:
+        current_app.logger.exception("R2 unavailable during upload")
+        return json_error("storage_unavailable", "Object storage is temporarily unavailable.", 503)
     except OSError:
         current_app.logger.exception("Storage unavailable during upload")
         return json_error("storage_unavailable", "Upload storage is temporarily unavailable.", 503)
@@ -311,6 +667,7 @@ def _finalize_response(token: str, payload: dict[str, Any]) -> Response:
 
 
 @bp.post("/finalize")
+@upload_auth_required
 @rate_limit("upload-finalize", "RATE_LIMIT_FINALIZE")
 def finalize_upload() -> tuple[Response, int] | Response:
     data = request.get_json(silent=True)
@@ -341,14 +698,15 @@ def finalize_upload() -> tuple[Response, int] | Response:
         current_app.logger.exception("Redis unavailable while preparing finalization")
         return json_error("service_unavailable", "The upload service is temporarily unavailable.", 503)
 
-    storage: UploadStorage = current_app.extensions["upload_storage"]
-    expires_at = int(time.time()) + token_ttl + cleanup_grace
-    try:
-        storage.refresh_session(session_id, expires_at)
-        storage.finalize_session(session_id, token, expires_at)
-    except (StorageError, OSError):
-        current_app.logger.exception("Could not move session %s into share storage", fingerprint(session_id))
-        return json_error("storage_error", "The upload session could not be finalized.", 500)
+    if current_app.config["STORAGE_BACKEND"] == "local":
+        storage: UploadStorage = current_app.extensions["upload_storage"]
+        expires_at = int(time.time()) + token_ttl + cleanup_grace
+        try:
+            storage.refresh_session(session_id, expires_at)
+            storage.finalize_session(session_id, token, expires_at)
+        except (StorageError, OSError):
+            current_app.logger.exception("Could not move session %s into share storage", fingerprint(session_id))
+            return json_error("storage_error", "The upload session could not be finalized.", 500)
 
     try:
         payload = publish_share(
