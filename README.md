@@ -321,3 +321,7 @@ docker-compose.yml
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### Portainer + Tailscale Funnel
+
+For a fully self-hosted deployment that keeps uploads and Redis on the Docker host while publishing the app at a neutral public `*.ts.net` hostname with no router port forwards, see [`deploy/tailscale-funnel/README.md`](deploy/tailscale-funnel/README.md).
